@@ -2,13 +2,16 @@ from bs4 import BeautifulSoup
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from selenium import webdriver
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-# from selenium.webdriver.firefox.service import Service
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.firefox.options import Options
+import selenium.common.exceptions as exceptions
 import os
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 import threading
+
 
 load_dotenv()
 credentials_path = os.getenv('CREDENTIALS_PATH')
@@ -22,43 +25,54 @@ client = gspread.authorize(creds)
 options = Options()
 options.add_argument('-headless')
 
-driver = webdriver.Firefox(options=options)  # create a new Firefox webdriver instance
-
-end_sheet = client.open_by_key(spreadsheet_id).get_worksheet(1)
 source_sheet = client.open_by_key(spreadsheet_id).worksheet('urls')
+end_sheet = client.open_by_key(spreadsheet_id).get_worksheet(0)
+
+lock = threading.Lock()
+tl = threading.local()
+
+
+def scrape_price(cell, soup):
+    meta_element = soup.find("meta", {"data-qa": "meta-price"})
+    price = meta_element.get("content").replace('.', ',')
+    # lock.acquire()
+    # print("LOCKED for cell", cell.row, cell.col)
+    end_sheet.update_cell(cell.row, cell.col, price)
+    print(cell.row, cell.col, "success")
+    # lock.release()
+    # print("UNLOCKED for cell", cell.row, cell.col)
 
 
 # Define a function to scrape prices from a URL
-def scrape_price(cell, url):
+def get_url_write_price(cell, url):
+    print(cell.row, cell.col)
+    driver = webdriver.Firefox(options=options)
     try:
         driver.get(url)
-        WebDriverWait(driver, 3.5)
+        WebDriverWait(driver, 3.5).until(EC.presence_of_element_located((By.CSS_SELECTOR,
+                                                                         'meta[data-qa="meta-price"]')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        meta_element = soup.find("meta", {"data-qa": "meta-price"})
-        price = meta_element.get("content").replace('.', ',')
-    except Exception as e:
-        print(f"Error scraping cell {cell.row} {cell.col}, URL {url}: {e}")
-        print("html:")
-        print(soup)
-        print("retrying...")
+        print(cell.row, cell.col, "soup parsed")
+        scrape_price(cell, soup)
+    except exceptions as e:
+        print(f"Error scraping cell {cell.row} {cell.col}, URL {url}: , html: ")
+        print(f"retrying for cell {cell.row} {cell.col}...")
         try:
             driver.get(url)
-            # time.sleep(6)
-            WebDriverWait(driver, 9)
+            WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR,
+                                                                            'meta[data-qa="meta-price"]')))
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            meta_element = soup.find("meta", {"data-qa": "meta-price"})
-            price = meta_element.get("content").replace('.', ',')
+            scrape_price(cell, soup)
         except AttributeError:
-            print("unsuccessful, skipped; please check cell", cell.row, cell.col, "manually")
-            price = ""
+            print(f"unsuccessful, skipped; please check cell {cell.row} {cell.col} manually")
+            # tl.price = ""
         else:
             print("success!")
-        # price = ""
-    end_sheet.update_cell(cell.row, cell.col, price)
+    finally:
+        driver.quit()
 
 
-# Use a ThreadPoolExecutor to run multiple requests in parallel
-executor = ThreadPoolExecutor(max_workers=2)  # 20
+executor = ThreadPoolExecutor(max_workers=10)  # 20 ?
 cell_range = source_sheet.range('D4:Q100')
 for cell in cell_range:
     url = cell.value
@@ -66,50 +80,6 @@ for cell in cell_range:
     if not url:
         continue
 
-    # Scrape the price in a separate thread
-    executor.submit(scrape_price, cell, url)
+    executor.submit(get_url_write_price, cell, url)
 
-# Wait for all tasks to complete
 executor.shutdown(wait=True)
-
-# for cell in cell_range:
-#     url = cell.value
-#     if url == '':
-#         continue
-#         # price = ""
-#     else:
-#         driver.get(url)
-#
-#         WebDriverWait(driver, 3)
-#
-#         print(cell.row, cell.col)
-#
-#         soup = BeautifulSoup(driver.page_source, 'html.parser')
-#
-#         # Find the meta-price element and extract the price
-#         try:
-#             meta_element = soup.find("meta", {"data-qa": "meta-price"})
-#             price = meta_element.get("content").replace('.', ',')
-#             # print(price)
-#         except AttributeError as e:
-#             print("meta element or its content not found for cell", cell.row, cell.col)
-#             print("at url:", url)
-#             print("html:")
-#             print(soup)
-#             print("retrying...")
-#             try:
-#                 driver.get(url)
-#                 # time.sleep(6)
-#                 WebDriverWait(driver, 9)
-#                 soup = BeautifulSoup(driver.page_source, 'html.parser')
-#                 meta_element = soup.find("meta", {"data-qa": "meta-price"})
-#                 price = meta_element.get("content").replace('.', ',')
-#             except AttributeError:
-#                 print("unsuccessful, skipped; please check cell", cell.row, cell.col, "manually")
-#                 price = ""
-#             else:
-#                 print("success!")
-#
-#     end_sheet.update_cell(cell.row, cell.col, price)  # Write the price to the Google Spreadsheet
-
-driver.quit()
